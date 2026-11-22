@@ -1,26 +1,25 @@
 import json
 import os
+import re
 import sys
-from datetime import datetime
+import unicodedata
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 
 # ================= NASTAVENÍ =================
-# >>> TADY DOPLŇ, CO A KDY CHCEŠ HLÍDAT <<<
+# Hlídání "natvrdo" (volitelné). Další zadáváš zprávou v Discordu.
 HLEDANI = [
-    # datum (RRRR-MM-DD)
-    # od, do   = rozmezí, ve kterém může rezervace ZAČÍNAT (včetně "do")
-    # delka_min = délka hry v minutách (60, 90, 120, ...)
-    {"datum": "2026-11-26", "od": "17:00", "do": "20:00", "delka_min": 90},
-    # další hledání přidáš zkopírováním řádku výše, např.:
-    # {"datum": "2026-11-28", "od": "10:00", "do": "14:00", "delka_min": 90},
+    # {"datum": "2026-11-27", "od": "17:00", "do": "20:00", "delka_min": 90},
 ]
 # =============================================
 
-# Webhook se sem NEPÍŠE, bere se z GitHub Secrets
+# Tajné hodnoty se berou z GitHub Secrets
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
 URL = "https://onepadel.cz/book"
 HEADERS = {
@@ -34,8 +33,13 @@ HEADERS = {
 }
 PRAHA = ZoneInfo("Europe/Prague")
 STAV_SOUBOR = Path(__file__).with_name("stav.json")
+POVOLENE_DELKY = {60, 90, 120, 150, 180, 210, 240}
+DATUM_RE = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.?(?:\s*(\d{4}))?")
+NAPOVEDA = ("Příklad: hlidej 27.11. 17-20 90 (datum, rozmezí začátku, délka v minutách). "
+            "Další příkazy: zrus 27.11. · zrus vse · seznam")
 
 
+# ---------- odesílání zpráv ----------
 def posli_zpravu(text):
     if not DISCORD_WEBHOOK:
         raise RuntimeError("Chybí DISCORD_WEBHOOK (nastav ho v GitHub Secrets)")
@@ -44,17 +48,151 @@ def posli_zpravu(text):
         raise RuntimeError(f"Discord vrátil chybu {r.status_code}")
 
 
+# ---------- stav ----------
 def nacti_stav():
     try:
         return json.loads(STAV_SOUBOR.read_text(encoding="utf-8"))
     except Exception:
-        return {"videno": [], "chyba": False}
+        return {}
 
 
 def uloz_stav(stav):
-    STAV_SOUBOR.write_text(json.dumps(stav), encoding="utf-8")
+    STAV_SOUBOR.write_text(json.dumps(stav, ensure_ascii=False), encoding="utf-8")
 
 
+# ---------- příkazy z Discordu ----------
+def bez_diakritiky(t):
+    return "".join(c for c in unicodedata.normalize("NFD", t)
+                   if unicodedata.category(c) != "Mn")
+
+
+def popis(h):
+    d = date.fromisoformat(h["datum"]).strftime("%d.%m.%Y")
+    return f'{d}, start {h["od"]}–{h["do"]}, hra {h["delka_min"]} min'
+
+
+def najdi_datum(text, dnes):
+    m = DATUM_RE.search(text)
+    if not m:
+        return None
+    den, mesic = int(m.group(1)), int(m.group(2))
+    rok = int(m.group(3)) if m.group(3) else None
+    try:
+        d = date(rok or dnes.year, mesic, den)
+        if rok is None and d < dnes:
+            d = date(dnes.year + 1, mesic, den)
+    except ValueError:
+        return None
+    return d, m
+
+
+def parse_hlidej(text, dnes):
+    nalez = najdi_datum(text, dnes)
+    if not nalez:
+        return None
+    d, m = nalez
+    zbytek = text[:m.start()] + " " + text[m.end():]
+    t = re.search(r"(\d{1,2})(?::(\d{2}))?\s*[-–]\s*(\d{1,2})(?::(\d{2}))?", zbytek)
+    if not t:
+        return None
+    h1, m1 = int(t.group(1)), int(t.group(2) or 0)
+    h2, m2 = int(t.group(3)), int(t.group(4) or 0)
+    if not (0 <= h1 <= 23 and 0 <= h2 <= 23 and m1 < 60 and m2 < 60):
+        return None
+    od, do = f"{h1:02d}:{m1:02d}", f"{h2:02d}:{m2:02d}"
+    if od > do:
+        return None
+    zbytek2 = zbytek[:t.start()] + " " + zbytek[t.end():]
+    dl = re.search(r"\b(\d{2,3})\b", zbytek2)
+    delka = int(dl.group(1)) if dl else 90
+    if delka not in POVOLENE_DELKY:
+        return None
+    return {"datum": d.isoformat(), "od": od, "do": do, "delka_min": delka}
+
+
+def zpracuj_prikaz(text, hledani, dnes):
+    t = bez_diakritiky(text.strip().lower())
+    slovo, _, zbytek = t.partition(" ")
+    zbytek = zbytek.strip()
+
+    if slovo in ("hlidej", "hledej", "hlidat"):
+        h = parse_hlidej(zbytek, dnes)
+        if not h:
+            return "❓ Nerozumím. " + NAPOVEDA
+        if h in hledani:
+            return f"ℹ️ Už hlídám: {popis(h)}"
+        hledani.append(h)
+        return f"✅ Hlídám: {popis(h)}"
+
+    if slovo in ("zrus", "smaz"):
+        if zbytek == "vse":
+            n = len(hledani)
+            hledani.clear()
+            return f"🗑️ Zrušeno všech hlídání: {n}"
+        nalez = najdi_datum(zbytek, dnes)
+        if not nalez:
+            return "❓ Napiš datum, např.: zrus 27.11. (nebo: zrus vse)"
+        iso = nalez[0].isoformat()
+        zbyva = [h for h in hledani if h["datum"] != iso]
+        n = len(hledani) - len(zbyva)
+        hledani[:] = zbyva
+        return f"🗑️ Zrušeno hlídání pro {nalez[0].strftime('%d.%m.%Y')}: {n}"
+
+    if slovo in ("seznam", "stav"):
+        vsechna = HLEDANI + hledani
+        if not vsechna:
+            return "📋 Teď nic nehlídám."
+        return "📋 Hlídám:\n" + "\n".join("• " + popis(h) for h in vsechna)
+
+    return None  # ostatní zprávy ignorujeme
+
+
+def nacti_zpravy(last_id):
+    params = {"limit": 50}
+    if last_id:
+        params["after"] = last_id
+    r = requests.get(
+        f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages",
+        headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+                 "User-Agent": "DiscordBot (padel-hlidac, 1.0)"},
+        params=params, timeout=30,
+    )
+    r.raise_for_status()
+    return sorted(r.json(), key=lambda m: int(m["id"]))
+
+
+def zpracuj_discord(stav, dnes):
+    if not (DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID):
+        return
+    try:
+        zpravy = nacti_zpravy(stav.get("last_msg"))
+    except Exception as e:
+        print("Příkazy z Discordu nelze načíst:", e)
+        if not stav.get("chyba_prikazy"):
+            try:
+                posli_zpravu(f"⚠️ Nemohu číst příkazy z Discordu: {str(e)[:150]}")
+                stav["chyba_prikazy"] = True
+            except Exception as e2:
+                print("Nepodařilo se odeslat upozornění:", e2)
+        return
+    stav["chyba_prikazy"] = False
+
+    odpovedi = []
+    for m in zpravy:
+        stav["last_msg"] = m["id"]
+        if m.get("author", {}).get("bot") or m.get("webhook_id"):
+            continue
+        o = zpracuj_prikaz(m.get("content", ""), stav["hledani"], dnes)
+        if o:
+            odpovedi.append(o)
+    if odpovedi:
+        try:
+            posli_zpravu("\n".join(odpovedi))
+        except Exception as e:
+            print("Odpověď se nepodařilo odeslat:", e)
+
+
+# ---------- hledání kurtů ----------
 def nacti_sloty(ymd, delka):
     body = [{"tenantSlug": "onepadel", "venueSlug": "praha-zlicin",
              "ymd": ymd, "durationMinutes": delka}]
@@ -96,19 +234,28 @@ def main():
         print("Testovací zpráva odeslána.")
         return
 
+    dnes = datetime.now(PRAHA).date()
     stav = nacti_stav()
-    videno = set(stav.get("videno", []))
-    aktualni = {}
-    dnes = datetime.now(PRAHA).date().isoformat()
+    stav.setdefault("videno", [])
+    stav.setdefault("hledani", [])
+    stav.setdefault("chyba", False)
+    stav.setdefault("chyba_prikazy", False)
+    stav.setdefault("last_msg", None)
+    stav["hledani"] = [h for h in stav["hledani"] if h["datum"] >= dnes.isoformat()]
 
+    zpracuj_discord(stav, dnes)
+    uloz_stav(stav)
+
+    videno = set(stav["videno"])
+    aktualni = {}
     try:
-        for h in HLEDANI:
-            if h["datum"] < dnes:
+        for h in HLEDANI + stav["hledani"]:
+            if h["datum"] < dnes.isoformat():
                 continue
             aktualni.update(hledej(h))
     except Exception as e:
         print("CHYBA:", e)
-        if not stav.get("chyba"):          # upozorní jen jednou
+        if not stav["chyba"]:              # upozorní jen jednou
             try:
                 posli_zpravu(f"⚠️ Hlídač kurtů nefunguje: {str(e)[:150]}")
                 stav["chyba"] = True
@@ -130,7 +277,9 @@ def main():
         print("Nic nového.")
 
     # slot, který zmizí a pak se znovu uvolní, ohlásí skript znovu
-    uloz_stav({"videno": list(aktualni), "chyba": False})
+    stav["videno"] = list(aktualni)
+    stav["chyba"] = False
+    uloz_stav(stav)
 
 
 if __name__ == "__main__":
