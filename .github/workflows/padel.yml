@@ -25,6 +25,8 @@ jobs:
       - run: python hlidac.py ${{ github.event.inputs.test == 'true' && '--test' || '' }}
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
       - name: Uložit stav
         run: |
           git config user.name "bot"
