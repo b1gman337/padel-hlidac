@@ -19,9 +19,8 @@ HLEDANI = [
 ]
 # =============================================
 
-# Číslo a klíč se sem NEPÍŠOU, berou se z GitHub Secrets
-WA_TELEFON = os.environ.get("WA_TELEFON", "")
-WA_APIKEY = os.environ.get("WA_APIKEY", "")
+# Webhook se sem NEPÍŠE, bere se z GitHub Secrets
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 
 URL = "https://onepadel.cz/book"
 HEADERS = {
@@ -37,15 +36,12 @@ PRAHA = ZoneInfo("Europe/Prague")
 STAV_SOUBOR = Path(__file__).with_name("stav.json")
 
 
-def posli_wa(text):
-    if not WA_TELEFON or not WA_APIKEY:
-        raise RuntimeError("Chybí WA_TELEFON nebo WA_APIKEY (nastav je v GitHub Secrets)")
-    r = requests.get(
-        "https://api.callmebot.com/whatsapp.php",
-        params={"phone": WA_TELEFON, "text": text, "apikey": WA_APIKEY},
-        timeout=30,
-    )
-    r.raise_for_status()
+def posli_zpravu(text):
+    if not DISCORD_WEBHOOK:
+        raise RuntimeError("Chybí DISCORD_WEBHOOK (nastav ho v GitHub Secrets)")
+    r = requests.post(DISCORD_WEBHOOK, json={"content": text}, timeout=30)
+    if not r.ok:
+        raise RuntimeError(f"Discord vrátil chybu {r.status_code}")
 
 
 def nacti_stav():
@@ -96,7 +92,7 @@ def hledej(h):
 
 def main():
     if "--test" in sys.argv:
-        posli_wa("Test: hlídač kurtů funguje ✅")
+        posli_zpravu("Test: hlídač kurtů funguje ✅")
         print("Testovací zpráva odeslána.")
         return
 
@@ -114,7 +110,7 @@ def main():
         print("CHYBA:", e)
         if not stav.get("chyba"):          # upozorní jen jednou
             try:
-                posli_wa(f"⚠️ Hlídač kurtů nefunguje: {str(e)[:150]}")
+                posli_zpravu(f"⚠️ Hlídač kurtů nefunguje: {str(e)[:150]}")
                 stav["chyba"] = True
                 uloz_stav(stav)
             except Exception as e2:
@@ -128,7 +124,7 @@ def main():
         if len(nove) > 15:
             zprava += f"\n… a dalších {len(nove) - 15}"
         zprava += "\nhttps://onepadel.cz/book"
-        posli_wa(zprava)
+        posli_zpravu(zprava)
         print(zprava)
     else:
         print("Nic nového.")
@@ -137,4 +133,5 @@ def main():
     uloz_stav({"videno": list(aktualni), "chyba": False})
 
 
-if __name__ ==
+if __name__ == "__main__":
+    main()
