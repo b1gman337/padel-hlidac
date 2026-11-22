@@ -1,1 +1,1 @@
-{"videno": [], "hledani": [{"datum": "2026-11-26", "od": "17:00", "do": "20:00", "delka_min": 90}], "chyba": false, "chyba_prikazy": false, "last_msg": "1574099334776103106"}
+{"videno": ["2026-11-26|90|13:00", "2026-11-26|90|13:30", "2026-11-26|90|14:00"], "hledani": [{"datum": "2026-11-26", "od": "17:00", "do": "20:00", "delka_min": 90}, {"datum": "2026-11-26", "od": "11:00", "do": "14:00", "delka_min": 90}], "chyba": false, "chyba_prikazy": false, "last_msg": "1574100977899012188"}
